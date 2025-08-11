@@ -68,6 +68,23 @@ let workNeeded = 5; // The amount of work needed for a new food to be generated
 let simStart = false; // Flag indicating whether the simulation has started
 let startFrame = null; // Frame count at which the simulation starts
 
+// Simulation runtime state and results
+let simRunning = false; // true when ticking behaviors
+let simOver = false; // true after game-over condition
+let resultPanelVisible = false; // toggle to show/hide results overlay
+let finalScore = 0; // seconds survived (or time since start)
+let gameOverFrame = 0;
+
+// Time-series sampling and user action logging
+const SERIES_INTERVAL = 6; // frames between samples
+const MAX_SERIES_POINTS = 5000; // cap to avoid growth
+let seriesSamples = []; // [{t, objects, foods, sites}]
+let userActions = []; // [{t, type, x, y}]
+
+// Result panel button rects
+let resultHideBtnRect = null;
+let resultBackBtnRect = null;
+
 
 function setup() {
   createCanvas(windowWidth, windowHeight);
@@ -96,22 +113,41 @@ function draw() {
   if (drawObjectPath) {
     fadeTrailsLayer(8); // slightly slower fade for visibility
   }
-  // Rebuild spatial grid for this frame
-  rebuildSpatialGrid();
-  
-  // Call behavior function for each object
-  for (j = 0; j < objectArray.length; j ++) {
-    objectsBehave(objectArray[j]);
-  }
-  
-  // Call behavior function for each food item
-  for (i = 0; i < foodArray.length; i ++) {
-    foodsBehave(foodArray[i]);
-  }
-  
-  // Call behavior function for each site
-  for (i = 0; i < siteArray.length; i ++) {
-    siteBehave(siteArray[i]);
+  // Simulation updates
+  if (simStart) {
+    if (simRunning) {
+      // Rebuild spatial grid for this frame
+      rebuildSpatialGrid();
+      // Behaviors
+      for (j = 0; j < objectArray.length; j ++) {
+        objectsBehave(objectArray[j]);
+      }
+      for (i = 0; i < foodArray.length; i ++) {
+        foodsBehave(foodArray[i]);
+      }
+      for (i = 0; i < siteArray.length; i ++) {
+        siteBehave(siteArray[i]);
+      }
+      // Sample series every interval
+      if ((frameCount - startFrame) % SERIES_INTERVAL === 0) {
+        seriesSamples.push({
+          t: (frameCount - startFrame),
+          objects: objectArray.length,
+          foods: foodArray.length,
+          sites: siteArray.length
+        });
+        if (seriesSamples.length > MAX_SERIES_POINTS) seriesSamples.shift();
+      }
+      // Check game-over
+      if ((foodArray.length === 0 && siteArray.length === 0) || objectArray.length === 0) {
+        endGame();
+      }
+    } else {
+      // Frozen state: draw entities without updating logic so paths remain visible
+      for (const o of objectArray) { o.display(); }
+      for (const f of foodArray) { f.display(); }
+      for (const s of siteArray) { s.display(); }
+    }
   }
 
   // Draw transient effects on top
@@ -130,6 +166,10 @@ function draw() {
     startFrame = frameCount;
   } else if (simStart === true) {
     drawMouseTooltip();
+  }
+  // Results overlay
+  if (simOver && resultPanelVisible) {
+    drawResultPanel();
   }
   
 }
@@ -211,12 +251,29 @@ function updateAndDrawEffects() {
 
 function mouseClicked() {
   // Spawn new instances at the mouse location when clicked with different keys pressed
-  if (keyCode === 79) { // If the last pressed button is 'O'
-    initiateObject(mouseX, mouseY); 
-  } else if (keyCode === 70) { // If the last pressed button is 'F'
-    foodArray.push(new Foods(mouseX, mouseY, setMaxUtility)); 
-  } else if (keyCode === 83) { // If the last pressed button is 'S'
-    siteArray.push(new Sites(mouseX, mouseY, setMaxUtility));
+  // Result panel buttons (when visible)
+  if (simOver && resultPanelVisible && resultHideBtnRect && resultBackBtnRect) {
+    if (mouseX >= resultHideBtnRect.x && mouseX <= resultHideBtnRect.x + resultHideBtnRect.w && mouseY >= resultHideBtnRect.y && mouseY <= resultHideBtnRect.y + resultHideBtnRect.h) {
+      resultPanelVisible = false;
+      return;
+    }
+    if (mouseX >= resultBackBtnRect.x && mouseX <= resultBackBtnRect.x + resultBackBtnRect.w && mouseY >= resultBackBtnRect.y && mouseY <= resultBackBtnRect.y + resultBackBtnRect.h) {
+      resetToStart();
+      return;
+    }
+  }
+
+  if (simRunning) {
+    if (keyCode === 79) { // 'O'
+      initiateObject(mouseX, mouseY);
+      userActions.push({ t: (frameCount - startFrame), type: 'object', x: mouseX, y: mouseY });
+    } else if (keyCode === 70) { // 'F'
+      foodArray.push(new Foods(mouseX, mouseY, setMaxUtility));
+      userActions.push({ t: (frameCount - startFrame), type: 'food', x: mouseX, y: mouseY });
+    } else if (keyCode === 83) { // 'S'
+      siteArray.push(new Sites(mouseX, mouseY, setMaxUtility));
+      userActions.push({ t: (frameCount - startFrame), type: 'site', x: mouseX, y: mouseY });
+    }
   }
   // Handle p5-drawn start button click before sim starts
   if (!simStart && startBtnRect) {
@@ -691,10 +748,13 @@ function drawHUDCached() {
     // Right-aligned chips
     const rightX = windowWidth - 10;
     const topY = 14;
-    drawHUDChipToLayer(hudLayer, 'Sim Point: ' + (simStart ? (frameCount - startFrame) : 0), rightX, topY, 'RIGHT');
+    const simPoint = simStart ? (frameCount - startFrame) : 0;
+    const rightLabel = simOver ? 'Game Over' : ('Sim Point: ' + simPoint);
+    drawHUDChipToLayer(hudLayer, rightLabel, rightX, topY, 'RIGHT');
     drawHUDChipToLayer(hudLayer, 'Object Alive: ' + objectArray.length, rightX, topY + 28, 'RIGHT');
     // Left instruction chip (always shown)
-    drawHUDChipToLayer(hudLayer, 'O/F/S + click to spawn', 10, topY, 'LEFT');
+    const leftLabel = (simOver && !resultPanelVisible) ? 'Press R to show results' : 'O/F/S + click to spawn';
+    drawHUDChipToLayer(hudLayer, leftLabel, 10, topY, 'LEFT');
     hudLayer.pop();
     hudLastUpdateFrame = frameCount;
   }
@@ -774,6 +834,11 @@ function drawMouseTooltip() {
 function startSimulationFromControls() {
   if (simStart) return;
   simStart = true;
+  simRunning = true;
+  simOver = false;
+  resultPanelVisible = false;
+  seriesSamples = [];
+  userActions = [];
   const objN = objectSlider ? objectSlider.value() : initialObjectNum;
   const foodN = foodSlider ? foodSlider.value() : initialFoodNum;
   const siteN = siteSlider ? siteSlider.value() : initialSiteNum;
@@ -794,6 +859,9 @@ function startSimulationFromControls() {
   }
 
   hideStartControls();
+
+  // Record initial sample at t=0 to capture starting counts for graphs
+  seriesSamples.push({ t: 0, objects: objectArray.length, foods: foodArray.length, sites: siteArray.length });
 }
 
 function hideStartControls() {
@@ -803,4 +871,193 @@ function hideStartControls() {
   if (objectSlider) objectSlider.remove();
   if (foodSlider) foodSlider.remove();
   siteSlider = objectSlider = foodSlider = null;
+}
+
+// --- Game-over / results / reset ---
+function endGame() {
+  if (simOver) return;
+  simRunning = false;
+  simOver = true;
+  resultPanelVisible = true;
+  gameOverFrame = frameCount;
+  // Approx frameRate is 30
+  finalScore = (frameCount - startFrame) / 30;
+}
+
+function resetToStart() {
+  // Clear entities and effects
+  objectArray = [];
+  foodArray = [];
+  siteArray = [];
+  particleActive = [];
+  particlePool = [];
+  ringPulses = [];
+  buildTrailsLayer();
+  // Reset state
+  simStart = false;
+  simRunning = false;
+  simOver = false;
+  resultPanelVisible = false;
+  finalScore = 0;
+  gameOverFrame = 0;
+  seriesSamples = [];
+  userActions = [];
+  // Rebuild start UI on next frame naturally
+}
+
+function keyPressed() {
+  // Toggle results overlay with 'R' after game over
+  if (simOver && (key === 'r' || key === 'R')) {
+    resultPanelVisible = !resultPanelVisible;
+  }
+}
+
+function drawResultPanel() {
+  const panelW = Math.floor(windowWidth * 0.8);
+  const panelH = Math.floor(windowHeight * 0.65);
+  const panelX = Math.floor((windowWidth - panelW) / 2);
+  const panelY = Math.floor((windowHeight - panelH) / 2);
+
+  // Panel background
+  push();
+  drawingContext.shadowBlur = 30;
+  drawingContext.shadowColor = 'rgba(0,0,0,0.35)';
+  noStroke();
+  fill(164, 159, 213, 235);
+  rect(panelX, panelY, panelW, panelH, 24);
+  pop();
+
+  // Title and score
+  push();
+  fill(255);
+  textFont('Courier New');
+  textAlign(LEFT, CENTER);
+  textSize(28);
+  text('Results', panelX + 24, panelY + 36);
+  textSize(18);
+  text('Score: ' + finalScore.toFixed(1) + 's', panelX + 24, panelY + 72);
+  pop();
+
+  // Graph area settings
+  const innerPad = 24;
+  const graphsX = panelX + innerPad;
+  const graphsW = panelW - innerPad * 2;
+  const graphsTop = panelY + 100;
+  const graphsH = panelH - 160; // leave room for buttons
+  const eachH = Math.floor(graphsH / 3) - 8;
+
+  const timeMax = seriesSamples.length > 0 ? seriesSamples[seriesSamples.length - 1].t : 1;
+  const rects = [
+    { x: graphsX, y: graphsTop + 0 * (eachH + 12), w: graphsW, h: eachH, key: 'objects', label: 'Objects', col: color(255) },
+    { x: graphsX, y: graphsTop + 1 * (eachH + 12), w: graphsW, h: eachH, key: 'foods',   label: 'Foods',   col: color(statusColors.eat[0], statusColors.eat[1], statusColors.eat[2]) },
+    { x: graphsX, y: graphsTop + 2 * (eachH + 12), w: graphsW, h: eachH, key: 'sites',   label: 'Sites',   col: color(164, 159, 213) }
+  ];
+
+  for (const r of rects) {
+    drawSeriesGraph(r, timeMax);
+  }
+
+  // Buttons: Hide and Back
+  const btnW = 160;
+  const btnH = 40;
+  const gap = 18;
+  const bx = panelX + panelW - innerPad - btnW;
+  const by = panelY + panelH - innerPad - btnH;
+  // Back to Start (left)
+  resultBackBtnRect = { x: bx - btnW - gap, y: by, w: btnW, h: btnH };
+  // Hide panel (right)
+  resultHideBtnRect = { x: bx, y: by, w: btnW, h: btnH };
+
+  const drawBtn = (rectObj, label) => {
+    const hover = mouseX >= rectObj.x && mouseX <= rectObj.x + rectObj.w && mouseY >= rectObj.y && mouseY <= rectObj.y + rectObj.h;
+    const base = color(164, 159, 213, 240);
+    const lighter = color(184, 179, 233, 255);
+    const fillCol = hover ? lighter : base;
+    push();
+    noStroke();
+    fill(fillCol);
+    rect(rectObj.x, rectObj.y, rectObj.w, rectObj.h, 12);
+    fill(255);
+    textFont('Courier New');
+    textSize(18);
+    textAlign(CENTER, CENTER);
+    text(label, rectObj.x + rectObj.w / 2, rectObj.y + rectObj.h / 2 + 1);
+    pop();
+  };
+
+  drawBtn(resultBackBtnRect, 'Back to Start');
+  drawBtn(resultHideBtnRect, 'Hide Panel');
+}
+
+function drawSeriesGraph(rectInfo, timeMax) {
+  const { x, y, w, h, key, label, col } = rectInfo;
+  // Background
+  push();
+  noStroke();
+  fill(255, 255, 255, 22);
+  rect(x, y, w, h, 10);
+  pop();
+
+  // Axis baseline
+  push();
+  stroke(255, 120);
+  strokeWeight(1);
+  line(x + 8, y + h - 8, x + w - 8, y + h - 8);
+  pop();
+
+  // Label
+  push();
+  fill(255);
+  textFont('Courier New');
+  textSize(14);
+  textAlign(LEFT, TOP);
+  text(label, x + 12, y + 8);
+  pop();
+
+  // Determine vertical max
+  let vMax = 1;
+  for (const s of seriesSamples) vMax = Math.max(vMax, s[key]);
+  // Slightly increase visibility for small-count series (helps Sites in particular)
+  if (vMax <= 3) vMax = 3;
+
+  // Draw polyline
+  if (seriesSamples.length > 1) {
+    push();
+    noFill();
+    stroke(col);
+    strokeWeight(key === 'sites' ? 3 : 2);
+    beginShape();
+    for (const s of seriesSamples) {
+      const tx = map(s.t, 0, timeMax, x + 10, x + w - 10);
+      const ty = map(s[key], 0, vMax, y + h - 10, y + 26);
+      vertex(tx, ty);
+    }
+    endShape();
+    pop();
+  }
+
+  // Point markers to emphasize discrete changes
+  push();
+  fill(col);
+  noStroke();
+  for (const s of seriesSamples) {
+    const tx = map(s.t, 0, timeMax, x + 10, x + w - 10);
+    const ty = map(s[key], 0, vMax, y + h - 10, y + 26);
+    circle(tx, ty, 3);
+  }
+  pop();
+
+  // Event ticks
+  for (const ev of userActions) {
+    const tx = map(ev.t, 0, timeMax, x + 10, x + w - 10);
+    let c;
+    if (ev.type === 'object') c = color(255);
+    else if (ev.type === 'food') c = color(statusColors.eat[0], statusColors.eat[1], statusColors.eat[2]);
+    else c = color(164, 159, 213);
+    push();
+    stroke(c);
+    strokeWeight(2);
+    line(tx, y + h - 12, tx, y + h - 24);
+    pop();
+  }
 }
